@@ -13,8 +13,12 @@ jobs:
       - uses: subosito/flutter-action@v2
         with: { channel: stable }
       - run: bash tool/prepare.sh
-      - run: cd build_app && flutter build apk --release
+      - run: cd build_app && flutter build apk --release --split-per-abi
+      - name: Show APK details
+        run: |
+          export PATH=$PATH:$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | tail -1)
+          for f in build_app/build/app/outputs/flutter-apk/*.apk; do echo "== $f"; aapt dump badging "$f" | head -4; done || true
       - uses: actions/upload-artifact@v4
         with:
           name: MeToo-apk
-          path: build_app/build/app/outputs/flutter-apk/app-release.apk
+          path: build_app/build/app/outputs/flutter-apk/*.apk
