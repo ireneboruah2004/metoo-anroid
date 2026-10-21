@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'models.dart';
+import 'widget_sync.dart';
 
 /// Everything is stored on the phone only, in the platform keystore/keychain.
 class Store {
@@ -30,6 +31,8 @@ class Store {
       value: jsonEncode(items.map((e) => e.toJson()).toList()),
     );
     contactCount.value = items.length;
+    // The home-screen widget keeps its own copy of the numbers.
+    await WidgetSync.push(items);
   }
 
   static Future<List<Complaint>> complaints() async {

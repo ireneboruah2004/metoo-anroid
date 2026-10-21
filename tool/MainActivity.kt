@@ -25,5 +25,25 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(false)
                 }
             }
+
+        // Copies the trusted numbers and widget settings into a small private
+        // file that the home-screen widget service can read.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "metoo/widget")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "sync") { result.notImplemented(); return@setMethodCallHandler }
+                try {
+                    val numbers = call.argument<List<String>>("numbers") ?: emptyList()
+                    val siren = call.argument<Boolean>("siren") ?: false
+                    val countdown = call.argument<Int>("countdown") ?: 5
+                    getSharedPreferences(SosService.PREFS, MODE_PRIVATE).edit()
+                        .putString("numbers", numbers.joinToString(","))
+                        .putBoolean("siren", siren)
+                        .putInt("countdown", countdown)
+                        .apply()
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            }
     }
 }
