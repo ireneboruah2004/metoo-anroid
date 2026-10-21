@@ -77,3 +77,14 @@ for g in glob.glob(out+"/android/app/build.gradle*"):
     open(g,"w").write(t)
 PY
 (cd "$OUT" && flutter pub get)
+
+python3 - <<'PY'
+import os, re, glob
+root = os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache")
+for f in glob.glob(root + "/hosted/*/*/android/build.gradle*"):
+    t = open(f).read()
+    n = re.sub(r"compileSdk(Version)?(\s*=\s*|\s+)\d+", "compileSdk = 36", t)
+    if n != t:
+        open(f, "w").write(n)
+        print("patched", f)
+PY
