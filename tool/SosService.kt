@@ -26,9 +26,13 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.provider.CallLog
 import android.provider.Settings
 import android.telecom.TelecomManager
+import android.telephony.PhoneStateListener
 import android.telephony.SmsManager
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.widget.Toast
 import java.util.Calendar
 import java.util.concurrent.CountDownLatch
@@ -38,7 +42,11 @@ import java.util.concurrent.TimeUnit
  * Runs when the home-screen widget is tapped. Counts the taps, then:
  *   1 tap  -> countdown (default 5 s, with a Cancel button), then call + SMS
  *   2 taps -> call + SMS immediately
- *   3 taps -> siren + SMS (only if the siren is switched on in the app setup)
+ *   3 taps -> siren + SMS (only if the siren is switched on in the app settings)
+ *
+ * Calling: the contacts are called in list order. If a call is not answered
+ * (declined, busy, no pickup, unreachable) the next contact is called. The SMS
+ * with the location goes to ALL contacts at the same moment the first call starts.
  */
 class SosService : Service() {
 
@@ -50,6 +58,9 @@ class SosService : Service() {
         private const val CHANNEL = "metoo_sos"
         private const val NOTIF_ID = 4242
         private const val TAP_WINDOW_MS = 600L
+        private const val DIAL_TIMEOUT_MS = 15000L
+        private const val ANSWERED_MIN_SECONDS = 5L
+        private const val FALLBACK_ANSWERED_MS = 40000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -63,7 +74,19 @@ class SosService : Service() {
     private var volumeBefore = -1
     private var volumeObserver: ContentObserver? = null
 
+    // call chain
+    private var chainActive = false
+    private var chainNumbers: List<String> = emptyList()
+    private var chainIndex = 0
+    private var callStartMs = 0L
+    private var sawOffhook = false
+    private var listenerOn = false
+    private var telephony: TelephonyManager? = null
+    private var legacyListener: PhoneStateListener? = null
+    private var modernListener: Any? = null
+
     private val decide = Runnable { onTapsSettled() }
+    private val dialWatchdog = Runnable { onDialFailed() }
 
     private val tick = object : Runnable {
         override fun run() {
@@ -98,7 +121,9 @@ class SosService : Service() {
                 handler.removeCallbacks(decide)
                 handler.postDelayed(decide, TAP_WINDOW_MS)
             }
-            ACTION_CANCEL -> cancelCountdown()
+            ACTION_CANCEL -> {
+                if (chainActive) endChain("Stopped calling further contacts") else cancelCountdown()
+            }
             ACTION_STOP_SIREN -> stopSiren()
             else -> finishIfIdle()
         }
@@ -107,6 +132,7 @@ class SosService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        unregisterCallListener()
         releaseSiren()
         super.onDestroy()
     }
@@ -131,6 +157,10 @@ class SosService : Service() {
                     toast("Siren is switched off in MeToo settings")
                     finishIfIdle()
                 }
+            }
+            chainActive -> {
+                toast("Already calling your contacts")
+                finishIfIdle()
             }
             n == 2 || (n == 1 && countingDown) -> fireNow()
             n == 1 -> startCountdown()
@@ -172,9 +202,11 @@ class SosService : Service() {
             return
         }
         vibrate(400)
-        notify(buildNotification("MeToo: alert sent", "Calling ${numbers[0]} and sending your location"))
         busy = true
-        placeCall(numbers[0])
+        // The call starts right away. The SMS with the location goes to everyone
+        // in the background at the same time (the location lookup can take a few
+        // seconds, so it must not delay the call).
+        startCallChain(numbers)
         Thread {
             sendAlertSms(numbers)
             handler.post {
@@ -185,7 +217,7 @@ class SosService : Service() {
     }
 
     private fun finishIfIdle() {
-        if (!countingDown && !sirenOn && !busy && taps == 0) {
+        if (!countingDown && !sirenOn && !busy && !chainActive && taps == 0) {
             handler.removeCallbacks(decide)
             stopForeground(Service.STOP_FOREGROUND_REMOVE)
             foregroundStarted = false
@@ -193,24 +225,200 @@ class SosService : Service() {
         }
     }
 
+    // ------------------------------------------------------------ call chain
+
+    private fun startCallChain(numbers: List<String>) {
+        chainNumbers = numbers
+        chainIndex = 0
+        chainActive = true
+        registerCallListener()
+        dialCurrent()
+    }
+
+    private fun dialCurrent() {
+        if (!chainActive) return
+        if (chainIndex >= chainNumbers.size) {
+            endChain("No one picked up. Your location was texted to all your contacts.")
+            return
+        }
+        val number = chainNumbers[chainIndex]
+        showChain("Calling contact ${chainIndex + 1} of ${chainNumbers.size}: $number")
+        sawOffhook = false
+        callStartMs = System.currentTimeMillis()
+        if (!placeCall(number)) {
+            endChain(null)
+            return
+        }
+        if (!listenerOn) {
+            // Without the phone-state permission we cannot see how the call ended.
+            if (chainNumbers.size > 1) {
+                toast("Allow Phone permission in MeToo settings so the next contact can be called")
+            }
+            endChain(null)
+            return
+        }
+        handler.removeCallbacks(dialWatchdog)
+        handler.postDelayed(dialWatchdog, DIAL_TIMEOUT_MS)
+    }
+
+    /** The phone never started the call (bad number, no network, ...). */
+    private fun onDialFailed() {
+        if (!chainActive || sawOffhook) return
+        chainIndex++
+        dialCurrent()
+    }
+
+    private fun onCallState(state: Int) {
+        if (!chainActive) return
+        when (state) {
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                if (!sawOffhook) {
+                    sawOffhook = true
+                    handler.removeCallbacks(dialWatchdog)
+                }
+            }
+            TelephonyManager.CALL_STATE_IDLE -> {
+                if (sawOffhook) {
+                    sawOffhook = false
+                    // The call log is written a moment after the call ends.
+                    handler.postDelayed({ afterCallEnded() }, 2000)
+                }
+            }
+        }
+    }
+
+    private fun afterCallEnded() {
+        if (!chainActive) return
+        if (wasAnswered()) {
+            endChain(null)
+            return
+        }
+        chainIndex++
+        if (chainIndex < chainNumbers.size) {
+            toast("No answer. Calling the next contact")
+            dialCurrent()
+        } else {
+            endChain("No one picked up. Your location was texted to all your contacts.")
+        }
+    }
+
+    /**
+     * A call counts as answered when it was connected for at least a few seconds.
+     * Uses the call log when permitted. Without it, a call that lasted a long
+     * time is assumed to have been answered. A voicemail greeting also counts
+     * as answered, because the phone network connects the call.
+     */
+    private fun wasAnswered(): Boolean {
+        if (checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
+            try {
+                val cursor = contentResolver.query(
+                    CallLog.Calls.CONTENT_URI,
+                    arrayOf(CallLog.Calls.DURATION, CallLog.Calls.TYPE),
+                    CallLog.Calls.DATE + " >= ?",
+                    arrayOf((callStartMs - 3000).toString()),
+                    CallLog.Calls.DATE + " DESC"
+                )
+                if (cursor != null) {
+                    cursor.use { c ->
+                        while (c.moveToNext()) {
+                            if (c.getInt(1) == CallLog.Calls.OUTGOING_TYPE) {
+                                return c.getLong(0) >= ANSWERED_MIN_SECONDS
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // fall through to the timing guess below
+            }
+        }
+        return System.currentTimeMillis() - callStartMs >= FALLBACK_ANSWERED_MS
+    }
+
+    private fun endChain(message: String?) {
+        handler.removeCallbacks(dialWatchdog)
+        chainActive = false
+        unregisterCallListener()
+        if (message != null) toast(message)
+        finishIfIdle()
+    }
+
+    @android.annotation.TargetApi(31)
+    private class ModernCallListener(private val onState: (Int) -> Unit) :
+        TelephonyCallback(), TelephonyCallback.CallStateListener {
+        override fun onCallStateChanged(state: Int) {
+            onState(state)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun registerCallListener() {
+        if (listenerOn) return
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return
+        try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            telephony = tm
+            if (Build.VERSION.SDK_INT >= 31) {
+                val cb = ModernCallListener { s -> handler.post { onCallState(s) } }
+                tm.registerTelephonyCallback(mainExecutor, cb)
+                modernListener = cb
+            } else {
+                val l = object : PhoneStateListener() {
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        handler.post { onCallState(state) }
+                    }
+                }
+                tm.listen(l, PhoneStateListener.LISTEN_CALL_STATE)
+                legacyListener = l
+            }
+            listenerOn = true
+        } catch (e: Exception) {
+            listenerOn = false
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun unregisterCallListener() {
+        if (!listenerOn) return
+        try {
+            val tm = telephony
+            if (tm != null) {
+                if (Build.VERSION.SDK_INT >= 31) {
+                    val cb = modernListener as? TelephonyCallback
+                    if (cb != null) tm.unregisterTelephonyCallback(cb)
+                } else {
+                    val l = legacyListener
+                    if (l != null) tm.listen(l, PhoneStateListener.LISTEN_NONE)
+                }
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+        modernListener = null
+        legacyListener = null
+        listenerOn = false
+    }
+
     // ------------------------------------------------------------------ call
 
-    private fun placeCall(number: String) {
+    private fun placeCall(number: String): Boolean {
         if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            toast("Phone permission missing. Open MeToo and allow Phone.")
-            return
+            toast("Phone permission missing. Open MeToo > Settings and allow Phone.")
+            return false
         }
         try {
             val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             tm.placeCall(Uri.fromParts("tel", number, null), Bundle())
+            return true
         } catch (e: Exception) {
             try {
                 startActivity(
                     Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(number)))
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
+                return true
             } catch (e2: Exception) {
                 toast("Could not place the call")
+                return false
             }
         }
     }
@@ -235,7 +443,7 @@ class SosService : Service() {
     @Suppress("DEPRECATION")
     private fun sendAlertSms(numbers: List<String>) {
         if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
-            handler.post { toast("SMS permission missing. Open MeToo and allow SMS.") }
+            handler.post { toast("SMS permission missing. Open MeToo > Settings and allow SMS.") }
             return
         }
         try {
@@ -387,16 +595,29 @@ class SosService : Service() {
         foregroundStarted = true
     }
 
-    private fun showCountdown() {
-        val cancelPi = PendingIntent.getService(
+    private fun cancelIntent(): PendingIntent =
+        PendingIntent.getService(
             this, 1, Intent(this, SosService::class.java).setAction(ACTION_CANCEL),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+
+    private fun showCountdown() {
+        val cancelPi = cancelIntent()
         notify(
             buildNotification(
                 "MeToo: calling in $secondsLeft s",
                 "Tap Cancel if this was a mistake. Tap the widget again to call now.",
                 listOf(action("Cancel", cancelPi)), cancelPi
+            )
+        )
+    }
+
+    private fun showChain(text: String) {
+        val cancelPi = cancelIntent()
+        notify(
+            buildNotification(
+                "MeToo: calling for help", text,
+                listOf(action("Stop calling", cancelPi)), cancelPi
             )
         )
     }

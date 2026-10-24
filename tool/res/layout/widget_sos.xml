@@ -12,7 +12,7 @@
         android:background="@drawable/widget_bg"
         android:gravity="center"
         android:text="SOS"
-        android:textColor="#FFFFFF"
+        android:textColor="#FFE9EF"
         android:textSize="14sp"
         android:textStyle="bold" />
 </FrameLayout>

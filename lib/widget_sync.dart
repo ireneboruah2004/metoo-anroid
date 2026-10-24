@@ -52,4 +52,25 @@ class WidgetSync {
       // Not Android, or the channel is missing: nothing to do.
     }
   }
+
+  /// Phone and call-log permission state, as seen by the Android side.
+  /// Keys: 'phone' (place calls + see call state), 'calllog' (see if answered).
+  static Future<Map<String, bool>> callPerms() async {
+    try {
+      final m = await _ch.invokeMapMethod<String, bool>('callPerms');
+      return {
+        'phone': m?['phone'] ?? false,
+        'calllog': m?['calllog'] ?? false,
+      };
+    } catch (_) {
+      return {'phone': false, 'calllog': false};
+    }
+  }
+
+  /// Shows the Android permission dialog for phone and call log.
+  static Future<void> requestCallPerms() async {
+    try {
+      await _ch.invokeMethod('requestCallPerms');
+    } catch (_) {}
+  }
 }

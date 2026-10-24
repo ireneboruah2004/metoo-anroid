@@ -88,3 +88,14 @@ for f in glob.glob(root + "/hosted/*/*/android/build.gradle*"):
         open(f, "w").write(n)
         print("patched", f)
 PY
+python3 - "$OUT" <<'PY'
+import sys
+mf = sys.argv[1] + "/android/app/src/main/AndroidManifest.xml"
+s = open(mf).read()
+extra = '''
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+    <uses-permission android:name="android.permission.READ_CALL_LOG"/>'''
+if "READ_PHONE_STATE" not in s:
+    s = s.replace('<uses-permission android:name="android.permission.CALL_PHONE"/>', '<uses-permission android:name="android.permission.CALL_PHONE"/>' + extra, 1)
+    open(mf, "w").write(s)
+PY

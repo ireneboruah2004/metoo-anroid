@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'pages/home_shell.dart';
-import 'pages/widget_setup_page.dart';
+import 'pages/home_page.dart';
 import 'sos_actions.dart';
 import 'store.dart';
 import 'theme.dart';
@@ -13,12 +12,6 @@ void main() {
   WidgetsBinding.instance.addPostFrameCallback((_) async {
     // Keep the home-screen widget in step with the saved contacts.
     await WidgetSync.push(await Store.contacts());
-    // First launch: ask about the siren, countdown and permissions.
-    if (!await WidgetSync.setupDone()) {
-      navKey.currentState?.push(
-        MaterialPageRoute<void>(builder: (_) => const WidgetSetupPage()),
-      );
-    }
   });
 }
 
@@ -32,7 +25,7 @@ class MeTooApp extends StatelessWidget {
       title: 'MeToo',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
-      home: const HomeShell(),
+      home: const HomePage(),
     );
   }
 }

@@ -1,20 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../sos_actions.dart';
 import '../store.dart';
 import '../widget_sync.dart';
 
-/// Shown once on first launch, and can be opened again later.
-/// Sets up the home-screen SOS widget: siren on/off, countdown, permissions.
-class WidgetSetupPage extends StatefulWidget {
-  const WidgetSetupPage({super.key});
+/// Settings: siren on/off, countdown, permissions. Everything saves by itself.
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
 
   @override
-  State<WidgetSetupPage> createState() => _WidgetSetupPageState();
+  State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _WidgetSetupPageState extends State<WidgetSetupPage> {
+class _SettingsPageState extends State<SettingsPage>
+    with WidgetsBindingObserver {
   bool _loading = true;
   bool _siren = false;
   double _countdown = WidgetSync.defaultCountdown.toDouble();
@@ -23,7 +22,20 @@ class _WidgetSetupPageState extends State<WidgetSetupPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Back from the phone's own settings screen: show the new state.
+    if (state == AppLifecycleState.resumed) _refreshPerms();
   }
 
   Future<void> _load() async {
@@ -39,8 +51,10 @@ class _WidgetSetupPageState extends State<WidgetSetupPage> {
   }
 
   Future<void> _refreshPerms() async {
+    final call = await WidgetSync.callPerms();
     final result = <String, bool>{
-      'Phone (calls)': await Permission.phone.isGranted,
+      'Phone (place calls)': call['phone'] ?? false,
+      'Call log (to see if a call was answered)': call['calllog'] ?? false,
       'SMS': await Permission.sms.isGranted,
       'Location': await Permission.location.isGranted,
       'Location, all the time': await Permission.locationAlways.isGranted,
@@ -51,7 +65,7 @@ class _WidgetSetupPageState extends State<WidgetSetupPage> {
   }
 
   Future<void> _allowPermissions() async {
-    await Permission.phone.request();
+    await WidgetSync.requestCallPerms();
     await Permission.sms.request();
     final loc = await Permission.location.request();
     if (loc.isGranted) await Permission.locationAlways.request();
@@ -59,55 +73,34 @@ class _WidgetSetupPageState extends State<WidgetSetupPage> {
     await _refreshPerms();
   }
 
-  Future<void> _save() async {
+  Future<void> _persist() async {
     await WidgetSync.save(siren: _siren, countdown: _countdown.round());
     await WidgetSync.push(await Store.contacts());
-    if (!mounted) return;
-    Navigator.of(context).pop();
-    toast('Widget settings saved');
   }
 
   @override
   Widget build(BuildContext context) {
-    final noContacts = Store.contactCount.value == 0;
+    final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('SOS widget setup')),
+      appBar: AppBar(title: const Text('Settings')),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                Text('Home-screen widget',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 8),
-                const Text(
-                  '1 tap: countdown, then calls your first trusted contact and '
-                  'sends your location by SMS to all contacts.\n'
-                  '2 taps: the same, right away.\n'
-                  '3 taps: siren (only if you switch it on below).',
-                ),
-                if (noContacts) ...[
-                  const SizedBox(height: 12),
-                  const Card(
-                    child: Padding(
-                      padding: EdgeInsets.all(12),
-                      child: Text(
-                        'You have no trusted contacts yet. Add at least one in '
-                        'the Contacts tab. The first one is the person who gets '
-                        'called.',
-                      ),
-                    ),
-                  ),
-                ],
-                const Divider(height: 32),
+                Text('Alerts', style: theme.textTheme.titleMedium),
+                const SizedBox(height: 4),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Enable siren (3 taps)'),
+                  title: const Text('Siren (3 taps on the widget)'),
                   subtitle: const Text(
                       'Loud alarm at full volume. Stops only after you unlock '
                       'your phone.'),
                   value: _siren,
-                  onChanged: (v) => setState(() => _siren = v),
+                  onChanged: (v) {
+                    setState(() => _siren = v);
+                    _persist();
+                  },
                 ),
                 const SizedBox(height: 8),
                 Text('Countdown after 1 tap: ${_countdown.round()} s'),
@@ -118,43 +111,55 @@ class _WidgetSetupPageState extends State<WidgetSetupPage> {
                   divisions: 10,
                   label: '${_countdown.round()} s',
                   onChanged: (v) => setState(() => _countdown = v),
+                  onChangeEnd: (_) => _persist(),
                 ),
                 const Text(
                   'During the countdown you can press Cancel in the '
                   'notification. 0 means no countdown.',
                 ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Calling order: your first trusted contact is called first. '
+                  'If they do not pick up, the next one is called, and so on. '
+                  'Your location is texted to all contacts at once.',
+                ),
                 const Divider(height: 32),
-                Text('Permissions',
-                    style: Theme.of(context).textTheme.titleMedium),
+                Text('Permissions', style: theme.textTheme.titleMedium),
                 const SizedBox(height: 8),
                 for (final e in _perms.entries)
-                  Row(
-                    children: [
-                      Icon(e.value ? Icons.check_circle : Icons.cancel,
-                          size: 18, color: e.value ? Colors.green : Colors.red),
-                      const SizedBox(width: 8),
-                      Text(e.key),
-                    ],
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      children: [
+                        Icon(
+                          e.value ? Icons.check_circle : Icons.cancel,
+                          size: 18,
+                          color: e.value ? Colors.green : Colors.redAccent,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(e.key)),
+                      ],
+                    ),
                   ),
-                const SizedBox(height: 8),
-                OutlinedButton(
+                const SizedBox(height: 12),
+                FilledButton(
                   onPressed: _allowPermissions,
                   child: const Text('Allow permissions'),
                 ),
                 const SizedBox(height: 8),
-                const Text(
-                  'Choose "Allow all the time" for location, so your position '
-                  'can be sent when the widget is tapped. If SMS is greyed out: '
-                  'phone Settings > Apps > MeToo > menu > Allow restricted '
-                  'settings.',
+                OutlinedButton(
+                  onPressed: openAppSettings,
+                  child: const Text('Open phone settings for MeToo'),
                 ),
-                const Divider(height: 32),
+                const SizedBox(height: 12),
                 const Text(
-                  'Add the widget: press and hold an empty spot on the home '
-                  'screen > Widgets > MeToo > drag the red SOS button out.',
+                  'For location choose "Allow all the time", so your position '
+                  'can be sent when the widget is tapped. If SMS or Call log '
+                  'is greyed out: phone Settings > Apps > MeToo > menu > Allow '
+                  'restricted settings, then allow the permission again.',
                 ),
-                const SizedBox(height: 24),
-                FilledButton(onPressed: _save, child: const Text('Save')),
+                const SizedBox(height: 16),
+                const Text('Changes are saved automatically.'),
               ],
             ),
     );
