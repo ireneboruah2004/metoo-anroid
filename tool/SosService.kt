@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo
 import android.database.ContentObserver
 import android.graphics.drawable.Icon
 import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
 import android.media.AudioAttributes
 import android.media.AudioManager
@@ -20,7 +21,6 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.CancellationSignal
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -37,6 +37,7 @@ import android.widget.Toast
 import java.util.Calendar
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Runs when the home-screen widget is tapped. Counts the taps, then:
@@ -45,8 +46,10 @@ import java.util.concurrent.TimeUnit
  *   3 taps -> siren + SMS (only if the siren is switched on in the app settings)
  *
  * Calling: the contacts are called in list order. If a call is not answered
- * (declined, busy, no pickup, unreachable) the next contact is called. The SMS
- * with the location goes to ALL contacts at the same moment the first call starts.
+ * (declined, busy, no pickup, unreachable) the next contact is called.
+ * The SMS with the location goes to ALL contacts at the same moment the first
+ * call starts. If no location could be found in time, a second SMS with the
+ * location follows as soon as it is found.
  */
 class SosService : Service() {
 
@@ -61,6 +64,9 @@ class SosService : Service() {
         private const val DIAL_TIMEOUT_MS = 15000L
         private const val ANSWERED_MIN_SECONDS = 5L
         private const val FALLBACK_ANSWERED_MS = 40000L
+        private const val FIRST_FIX_WAIT_MS = 10000L
+        private const val RETRY_FIX_WAIT_MS = 15000L
+        private const val FRESH_FIX_MS = 60000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -202,18 +208,10 @@ class SosService : Service() {
             return
         }
         vibrate(400)
-        busy = true
-        // The call starts right away. The SMS with the location goes to everyone
-        // in the background at the same time (the location lookup can take a few
-        // seconds, so it must not delay the call).
+        // Start the location lookup and the SMS FIRST, so the location request is
+        // already running when the phone app opens for the call.
+        startAlertThread(numbers)
         startCallChain(numbers)
-        Thread {
-            sendAlertSms(numbers)
-            handler.post {
-                busy = false
-                finishIfIdle()
-            }
-        }.start()
     }
 
     private fun finishIfIdle() {
@@ -423,25 +421,59 @@ class SosService : Service() {
         }
     }
 
-    // ------------------------------------------------------------------- SMS
+    // ------------------------------------------------------- location + SMS
 
-    private fun buildMessage(): String {
-        val cal = Calendar.getInstance()
-        val hh = cal.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0')
-        val mm = cal.get(Calendar.MINUTE).toString().padStart(2, '0')
-        val loc = bestLocation()
-        if (loc == null) {
-            return "EMERGENCY: I need help. I could not get my location. " +
-                "Please call me now. (MeToo, $hh:$mm)"
-        }
-        val link = "https://maps.google.com/?q=" +
-            String.format(java.util.Locale.US, "%.6f,%.6f", loc.latitude, loc.longitude)
-        return "EMERGENCY: I need help. My location: $link " +
-            "(accuracy about ${Math.round(loc.accuracy)} m). Sent via MeToo at $hh:$mm."
+    /**
+     * Gets the location and texts everyone, in the background, while the call is
+     * being placed. If no location is found within a few seconds the SMS goes
+     * out anyway (asking them to call), and a second SMS with the location
+     * follows as soon as one is found (tries for about a minute).
+     */
+    private fun startAlertThread(numbers: List<String>) {
+        busy = true
+        Thread {
+            var loc = bestLocation(FIRST_FIX_WAIT_MS)
+            sendAlertSms(numbers, buildMessage(loc))
+            if (loc == null && hasLocationPermission()) {
+                var tries = 0
+                while (loc == null && tries < 4) {
+                    loc = bestLocation(RETRY_FIX_WAIT_MS)
+                    tries++
+                }
+                if (loc != null) sendAlertSms(numbers, buildFollowUp(loc))
+            }
+            handler.post {
+                busy = false
+                finishIfIdle()
+            }
+        }.start()
     }
 
+    private fun hhmm(): String {
+        val cal = Calendar.getInstance()
+        return cal.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0') + ":" +
+            cal.get(Calendar.MINUTE).toString().padStart(2, '0')
+    }
+
+    private fun mapsLink(loc: Location): String =
+        "https://maps.google.com/?q=" +
+            String.format(java.util.Locale.US, "%.6f,%.6f", loc.latitude, loc.longitude)
+
+    private fun buildMessage(loc: Location?): String {
+        if (loc == null) {
+            return "EMERGENCY: I need help. I could not get my location yet. " +
+                "Please call me now. (MeToo, ${hhmm()})"
+        }
+        return "EMERGENCY: I need help. My location: ${mapsLink(loc)} " +
+            "(accuracy about ${Math.round(loc.accuracy)} m). Sent via MeToo at ${hhmm()}."
+    }
+
+    private fun buildFollowUp(loc: Location): String =
+        "UPDATE: My location: ${mapsLink(loc)} " +
+            "(accuracy about ${Math.round(loc.accuracy)} m). MeToo, ${hhmm()}."
+
     @Suppress("DEPRECATION")
-    private fun sendAlertSms(numbers: List<String>) {
+    private fun sendAlertSms(numbers: List<String>, body: String) {
         if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             handler.post { toast("SMS permission missing. Open MeToo > Settings and allow SMS.") }
             return
@@ -450,46 +482,81 @@ class SosService : Service() {
             val sms = if (Build.VERSION.SDK_INT >= 31)
                 getSystemService(SmsManager::class.java)
             else SmsManager.getDefault()
-            val parts = sms.divideMessage(buildMessage())
+            val parts = sms.divideMessage(body)
             for (n in numbers) sms.sendMultipartTextMessage(n, null, parts, null, null)
         } catch (e: Exception) {
             handler.post { toast("Could not send the SMS") }
         }
     }
 
-    /** Fresh fix if possible (Android 11+), otherwise the newest known position. */
-    private fun bestLocation(): Location? {
+    private fun hasLocationPermission(): Boolean =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun newestKnown(lm: LocationManager): Location? {
+        var best: Location? = null
+        for (p in lm.getProviders(true)) {
+            val l: Location? = try { lm.getLastKnownLocation(p) } catch (e: Exception) { null }
+            if (l == null) continue
+            val current = best
+            if (current == null || l.time > current.time) best = l
+        }
+        return best
+    }
+
+    /**
+     * Newest position, as fast as possible: a recent known fix is used at once,
+     * otherwise every available source (GPS, network, fused) is asked together
+     * and the first answer wins. Falls back to any older known position.
+     */
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun bestLocation(waitMs: Long): Location? {
+        if (!hasLocationPermission()) return null
         val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (!fine && !coarse) return null
         try {
             val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            if (Build.VERSION.SDK_INT >= 30) {
-                val provider = when {
-                    fine && lm.isProviderEnabled(LocationManager.GPS_PROVIDER) -> LocationManager.GPS_PROVIDER
-                    lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) -> LocationManager.NETWORK_PROVIDER
-                    else -> null
+            val known = newestKnown(lm)
+            if (known != null && System.currentTimeMillis() - known.time < FRESH_FIX_MS) return known
+
+            val providers = ArrayList<String>()
+            if (Build.VERSION.SDK_INT >= 31 && lm.isProviderEnabled(LocationManager.FUSED_PROVIDER)) {
+                providers.add(LocationManager.FUSED_PROVIDER)
+            }
+            if (fine && lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                providers.add(LocationManager.GPS_PROVIDER)
+            }
+            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                providers.add(LocationManager.NETWORK_PROVIDER)
+            }
+            if (providers.isEmpty()) return known
+
+            val latch = CountDownLatch(1)
+            val found = AtomicReference<Location?>(null)
+            val listener = object : LocationListener {
+                override fun onLocationChanged(location: Location) {
+                    if (found.compareAndSet(null, location)) latch.countDown()
                 }
-                if (provider != null) {
-                    val latch = CountDownLatch(1)
-                    var fresh: Location? = null
-                    val signal = CancellationSignal()
-                    lm.getCurrentLocation(provider, signal, mainExecutor) { l ->
-                        fresh = l
-                        latch.countDown()
+
+                @Suppress("OVERRIDE_DEPRECATION")
+                override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+
+                override fun onProviderEnabled(provider: String) {}
+
+                override fun onProviderDisabled(provider: String) {}
+            }
+            try {
+                for (p in providers) {
+                    try {
+                        lm.requestLocationUpdates(p, 0L, 0f, listener, Looper.getMainLooper())
+                    } catch (e: Exception) {
+                        // this source is not available, the others still work
                     }
-                    if (!latch.await(7, TimeUnit.SECONDS)) signal.cancel()
-                    if (fresh != null) return fresh
                 }
+                latch.await(waitMs, TimeUnit.MILLISECONDS)
+            } finally {
+                try { lm.removeUpdates(listener) } catch (e: Exception) {}
             }
-            var best: Location? = null
-            for (p in lm.getProviders(true)) {
-                val l: Location? = try { lm.getLastKnownLocation(p) } catch (e: Exception) { null }
-                if (l == null) continue
-                val current = best
-                if (current == null || l.time > current.time) best = l
-            }
-            return best
+            return found.get() ?: known
         } catch (e: Exception) {
             return null
         }
@@ -551,13 +618,7 @@ class SosService : Service() {
         vibrate(400)
 
         val numbers = contacts()
-        if (numbers.isNotEmpty()) {
-            busy = true
-            Thread {
-                sendAlertSms(numbers)
-                handler.post { busy = false }
-            }.start()
-        }
+        if (numbers.isNotEmpty()) startAlertThread(numbers)
     }
 
     /** Called only after the unlock check in StopSirenActivity succeeded. */
@@ -584,11 +645,21 @@ class SosService : Service() {
 
     // --------------------------------------------------------- notifications
 
+    /**
+     * The service declares the "location" type, so it may read the location
+     * while the phone app is on screen for the call. The type is only added
+     * when the location permission is granted (Android 14 requires that).
+     */
     private fun ensureForeground() {
         if (foregroundStarted) return
         val n = buildNotification("MeToo SOS", "Working on your tap")
+        val locOk = hasLocationPermission()
         if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            if (locOk) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            startForeground(NOTIF_ID, n, type)
+        } else if (Build.VERSION.SDK_INT >= 29 && locOk) {
+            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
             startForeground(NOTIF_ID, n)
         }

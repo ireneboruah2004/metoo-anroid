@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'pages/home_page.dart';
+import 'pages/home_shell.dart';
 import 'sos_actions.dart';
 import 'store.dart';
 import 'theme.dart';
@@ -25,7 +25,7 @@ class MeTooApp extends StatelessWidget {
       title: 'MeToo',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
-      home: const HomePage(),
+      home: const HomeShell(),
     );
   }
 }

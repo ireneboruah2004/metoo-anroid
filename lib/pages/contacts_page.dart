@@ -40,6 +40,17 @@ class _ContactsPageState extends State<ContactsPage> {
     if (mounted) setState(() => _items = next);
   }
 
+  Future<void> _move(int i, int delta) async {
+    final j = i + delta;
+    if (j < 0 || j >= _items.length) return;
+    final next = [..._items];
+    final t = next[i];
+    next[i] = next[j];
+    next[j] = t;
+    await Store.saveContacts(next);
+    if (mounted) setState(() => _items = next);
+  }
+
   Future<void> _remove(int i) async {
     final next = [..._items]..removeAt(i);
     await Store.saveContacts(next);
@@ -59,24 +70,43 @@ class _ContactsPageState extends State<ContactsPage> {
         padding: const EdgeInsets.all(16),
         children: [
           const Text(
-            'Save your 2 closest people. They get your location when you '
-            'tap SOS twice. Stored only on this phone.',
+            'Add up to 5 people you trust. When you use the MeToo widget, the '
+            'first one is called; if they do not pick up, the next one is '
+            'called. Everyone gets your location by SMS. Stored only on this '
+            'phone.',
           ),
           if (_items.length == 1)
             const Padding(
               padding: EdgeInsets.only(top: 8),
-              child: Text('Tip: add a second contact so someone always sees it.'),
+              child: Text('Tip: add a second contact so someone is called if the first does not pick up.'),
             ),
           const SizedBox(height: 12),
           for (var i = 0; i < _items.length; i++)
             Card(
               child: ListTile(
-                leading: const CircleAvatar(child: Icon(Icons.person)),
+                leading: CircleAvatar(child: Text('${i + 1}')),
                 title: Text(_items[i].name),
                 subtitle: Text(_items[i].phone),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline),
-                  onPressed: () => _remove(i),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Call earlier',
+                      icon: const Icon(Icons.arrow_upward),
+                      onPressed: i == 0 ? null : () => _move(i, -1),
+                    ),
+                    IconButton(
+                      tooltip: 'Call later',
+                      icon: const Icon(Icons.arrow_downward),
+                      onPressed:
+                          i == _items.length - 1 ? null : () => _move(i, 1),
+                    ),
+                    IconButton(
+                      tooltip: 'Delete',
+                      icon: const Icon(Icons.delete_outline),
+                      onPressed: () => _remove(i),
+                    ),
+                  ],
                 ),
               ),
             ),

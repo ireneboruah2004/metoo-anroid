@@ -5,18 +5,19 @@ import '../sos_actions.dart';
 import '../store.dart';
 import '../theme.dart';
 import '../widget_sync.dart';
-import 'home_shell.dart';
-import 'settings_page.dart';
 
 /// Front page: how to use the app, with a way into every other screen.
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, required this.onOpenTab});
+
+  /// Switches the bottom tab (4 = Settings).
+  final void Function(int index) onOpenTab;
 
   @override
-  State<HomePage> createState() => _HomePageState();
+  State<HomePage> createState() => HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+class HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _contacts = 0;
   bool _permsOk = true;
   bool _siren = false;
@@ -26,7 +27,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _refresh();
+    refresh();
   }
 
   @override
@@ -37,10 +38,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _refresh();
+    if (state == AppLifecycleState.resumed) refresh();
   }
 
-  Future<void> _refresh() async {
+  Future<void> refresh() async {
     final contacts = await Store.contacts();
     final call = await WidgetSync.callPerms();
     final sms = await Permission.sms.isGranted;
@@ -56,19 +57,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _openSettings() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
-    );
-    _refresh();
-  }
-
-  Future<void> _openSections() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const HomeShell()),
-    );
-    _refresh();
-  }
+  void _openSettings() => widget.onOpenTab(4);
 
   Widget _step(int n, String title, String body) {
     final scheme = Theme.of(context).colorScheme;
@@ -125,13 +114,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return Scaffold(
       appBar: AppBar(
         title: const Text('MeToo'),
-        actions: [
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings),
-            onPressed: _openSettings,
-          ),
-        ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
@@ -175,13 +157,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _step(
             1,
             'Add your trusted contacts',
-            'Open "Contacts, complaint & rights" below and add the people to '
+            'Open the Contacts tab at the bottom and add the people to '
                 'call. The first one in the list is called first.',
           ),
           _step(
             2,
             'Allow permissions',
-            'Open Settings (the gear at the top) and tap "Allow permissions". '
+            'Open the Settings tab at the bottom and tap "Allow permissions". '
                 'Choose "Allow all the time" for location.',
           ),
           _step(
@@ -238,22 +220,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: _openSections,
-            icon: const Icon(Icons.menu_book_outlined),
-            label: const Text('Contacts, complaint & rights'),
-          ),
-          const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: () => callNumber('112'),
             icon: const Icon(Icons.call),
             label: const Text('Call 112'),
-          ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: _openSettings,
-            icon: const Icon(Icons.settings),
-            label: const Text('Settings and permissions'),
           ),
         ],
       ),

@@ -99,3 +99,27 @@ if "READ_PHONE_STATE" not in s:
     s = s.replace('<uses-permission android:name="android.permission.CALL_PHONE"/>', '<uses-permission android:name="android.permission.CALL_PHONE"/>' + extra, 1)
     open(mf, "w").write(s)
 PY
+python3 - "$OUT" <<'PY'
+import sys
+mf = sys.argv[1] + "/android/app/src/main/AndroidManifest.xml"
+s = open(mf).read()
+if "FOREGROUND_SERVICE_LOCATION" not in s:
+    s = s.replace('<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>', '<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>', 1)
+    s = s.replace('android:foregroundServiceType="specialUse"', 'android:foregroundServiceType="specialUse|location"', 1)
+    open(mf, "w").write(s)
+PY
+python3 - "$OUT" <<'PY'
+import sys, os, glob, zlib, struct
+res = sys.argv[1] + "/android/app/src/main/res"
+def png(n):
+    raw = b"".join(b"\x00" + b"\xff\xff\xff" * n for _ in range(n))
+    def ch(t, d):
+        c = struct.pack(">I", len(d)) + t + d
+        return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return b"\x89PNG\r\n\x1a\n" + ch(b"IHDR", struct.pack(">IIBBBBB", n, n, 8, 2, 0, 0, 0)) + ch(b"IDAT", zlib.compress(raw)) + ch(b"IEND", b"")
+for d, n in {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}.items():
+    os.makedirs(res + "/mipmap-" + d, exist_ok=True)
+    open(res + "/mipmap-" + d + "/ic_launcher.png", "wb").write(png(n))
+for f in glob.glob(res + "/mipmap-anydpi*/ic_launcher*.xml"):
+    os.remove(f)
+PY

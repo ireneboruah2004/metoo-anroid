@@ -1,16 +1,15 @@
-import 'dart:async';
-
-import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:quick_actions/quick_actions.dart';
 
-import '../sos_actions.dart';
 import '../store.dart';
 import 'complaint_page.dart';
 import 'contacts_page.dart';
+import 'home_page.dart';
 import 'rights_page.dart';
-import 'sos_page.dart';
+import 'settings_page.dart';
 
+/// Main screen with the bottom tabs: Home, Contacts, Complaint, Rights, Settings.
+/// The emergency alert itself lives only in the home-screen widget.
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -18,80 +17,27 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
+class _HomeShellState extends State<HomeShell> {
   int _index = 0;
-  DateTime? _pausedAt;
-  final AppLinks _links = AppLinks();
-  StreamSubscription<Uri>? _sub;
+  final GlobalKey<HomePageState> _homeKey = GlobalKey<HomePageState>();
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    Store.contacts(); // fills the contact counter
-    // Ask one permission at a time: location first, then SMS.
-    LocationService.ensurePermission().then((_) => SmsSender.ensurePermission());
-    _initQuickActions();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initLinks());
+    Store.contacts();
+    _clearOldShortcuts();
   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _sub?.cancel();
-    super.dispose();
-  }
-
-  /// Coming back to the app after a few seconds away: show the SOS screen so
-  /// that the icon taps are counted there.
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused) {
-      _pausedAt = DateTime.now();
-    } else if (state == AppLifecycleState.resumed) {
-      final p = _pausedAt;
-      _pausedAt = null;
-      if (p != null &&
-          DateTime.now().difference(p) > const Duration(seconds: 3) &&
-          _index != 0) {
-        setState(() => _index = 0);
-      }
-    }
-  }
-
-  /// Deep links: metoo://alert , metoo://siren , metoo://sos
-  /// These are what an iPhone Back Tap shortcut calls.
-  Future<void> _initLinks() async {
+  /// Older versions added "Alert my contacts" shortcuts to the app icon.
+  Future<void> _clearOldShortcuts() async {
     try {
-      final initial = await _links.getInitialLink();
-      if (initial != null) _handleAction(initial.host);
+      await QuickActions().clearShortcutItems();
     } catch (_) {}
-    _sub = _links.uriLinkStream.listen((uri) => _handleAction(uri.host));
   }
 
-  /// Long-press the app icon: works on Android and iPhone.
-  void _initQuickActions() {
-    final quick = QuickActions();
-    quick.initialize((type) => _handleAction(type));
-    quick.setShortcutItems(const [
-      ShortcutItem(type: 'alert', localizedTitle: 'Alert my contacts'),
-      ShortcutItem(type: 'siren', localizedTitle: 'Siren + alert contacts'),
-    ]);
-  }
-
-  void _handleAction(String action) {
-    if (!mounted) return;
-    setState(() => _index = 0);
-    switch (action) {
-      case 'alert':
-        triggerAlert();
-        break;
-      case 'siren':
-        startEmergency();
-        break;
-      default:
-        break; // 'sos' just opens the SOS screen
-    }
+  void _select(int i) {
+    setState(() => _index = i);
+    if (i == 0) _homeKey.currentState?.refresh();
   }
 
   @override
@@ -99,22 +45,23 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     return Scaffold(
       body: IndexedStack(
         index: _index,
-        children: const [
-          SosPage(),
-          ContactsPage(),
-          ComplaintPage(),
-          RightsPage(),
+        children: [
+          HomePage(key: _homeKey, onOpenTab: _select),
+          const ContactsPage(),
+          const ComplaintPage(),
+          const RightsPage(),
+          const SettingsPage(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
+        onDestinationSelected: _select,
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.sos), label: 'SOS'),
-          NavigationDestination(icon: Icon(Icons.contacts), label: 'Contacts'),
-          NavigationDestination(
-              icon: Icon(Icons.edit_note), label: 'Complaint'),
+          NavigationDestination(icon: Icon(Icons.home_outlined), label: 'Home'),
+          NavigationDestination(icon: Icon(Icons.contacts_outlined), label: 'Contacts'),
+          NavigationDestination(icon: Icon(Icons.edit_note), label: 'Complaint'),
           NavigationDestination(icon: Icon(Icons.gavel), label: 'Rights'),
+          NavigationDestination(icon: Icon(Icons.settings_outlined), label: 'Settings'),
         ],
       ),
     );
